@@ -1,0 +1,6 @@
+module WacomAPI {
+    header "WacomTabletDriver.h"
+    header "TabletAEDictionary.h"
+    header "NSAppleEventDescriptorHelperCategory.h"
+    export *
+}

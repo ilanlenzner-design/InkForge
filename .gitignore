@@ -1,0 +1,9 @@
+.build/
+.swiftpm/
+*.dmg
+*.xcodeproj/
+xcuserdata/
+DerivedData/
+.DS_Store
+Resources/InkForge.iconset/
+scripts/generate-icon.swift
