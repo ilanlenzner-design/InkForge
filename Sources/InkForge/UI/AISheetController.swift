@@ -1,7 +1,7 @@
 import AppKit
 
 protocol AISheetDelegate: AnyObject {
-    func aiSheetDidProduceImage(_ image: CGImage)
+    func aiSheetDidProduceImage(_ image: CGImage, mode: AIMode)
     func aiSheetDidProduceText(_ text: String)
     func aiSheetRequestsCanvasImage() -> CGImage?
     func aiSheetRequestsSelectionMask() -> CGImage?
@@ -12,8 +12,9 @@ final class AISheetController: NSViewController {
 
     weak var delegate: AISheetDelegate?
 
-    private var modeSegment: NSSegmentedControl!
+    private var modePopup: NSPopUpButton!
     private var providerPopup: NSPopUpButton!
+    private var promptLabel: NSTextField!
     private var promptField: NSTextField!
     private var infoLabel: NSTextField!
     private var progressBar: NSProgressIndicator!
@@ -25,11 +26,19 @@ final class AISheetController: NSViewController {
     private var isProcessing = false
     private var currentProvider: AIProvider?
 
-    private let modes = AIMode.allCases
+    /// Flat list of modes in popup order (excludes group headers / separators).
+    private var popupModes: [AIMode] = []
+
+    private var selectedMode: AIMode {
+        guard let item = modePopup.selectedItem, item.tag >= 0, item.tag < popupModes.count else {
+            return .generate
+        }
+        return popupModes[item.tag]
+    }
 
     override func loadView() {
         let width: CGFloat = 440
-        let height: CGFloat = 360
+        let height: CGFloat = 380
 
         let container = NSView(frame: NSRect(x: 0, y: 0, width: width, height: height))
         container.wantsLayer = true
@@ -43,15 +52,20 @@ final class AISheetController: NSViewController {
         title.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(title)
 
-        // Mode segment
-        let modeLabels = modes.map { $0.displayName }
-        modeSegment = NSSegmentedControl(labels: modeLabels, trackingMode: .selectOne,
-                                          target: self, action: #selector(modeChanged))
-        modeSegment.selectedSegment = 0
-        modeSegment.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(modeSegment)
+        // Mode row
+        let modeLabel = NSTextField(labelWithString: "Mode:")
+        modeLabel.font = .systemFont(ofSize: 12)
+        modeLabel.textColor = .inkTextDim
+        modeLabel.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(modeLabel)
 
-        // Provider popup
+        modePopup = NSPopUpButton(frame: .zero, pullsDown: false)
+        modePopup.target = self
+        modePopup.action = #selector(modeChanged)
+        modePopup.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(modePopup)
+
+        // Provider row
         let providerLabel = NSTextField(labelWithString: "Provider:")
         providerLabel.font = .systemFont(ofSize: 12)
         providerLabel.textColor = .inkTextDim
@@ -63,7 +77,7 @@ final class AISheetController: NSViewController {
         container.addSubview(providerPopup)
 
         // Prompt field
-        let promptLabel = NSTextField(labelWithString: "Prompt:")
+        promptLabel = NSTextField(labelWithString: "Prompt:")
         promptLabel.font = .systemFont(ofSize: 12)
         promptLabel.textColor = .inkTextDim
         promptLabel.translatesAutoresizingMaskIntoConstraints = false
@@ -79,7 +93,7 @@ final class AISheetController: NSViewController {
         promptField.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(promptField)
 
-        // Info label (for inpaint mode)
+        // Info label
         infoLabel = NSTextField(labelWithString: "")
         infoLabel.font = .systemFont(ofSize: 11)
         infoLabel.textColor = .inkAccent
@@ -121,19 +135,25 @@ final class AISheetController: NSViewController {
         applyBtn.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(applyBtn)
 
+        let labelWidth: CGFloat = 60
+
         NSLayoutConstraint.activate([
             title.topAnchor.constraint(equalTo: container.topAnchor, constant: 16),
             title.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 20),
 
-            // Mode segment
-            modeSegment.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 14),
-            modeSegment.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 20),
-            modeSegment.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -20),
+            // Mode row
+            modeLabel.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 14),
+            modeLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 20),
+            modeLabel.widthAnchor.constraint(equalToConstant: labelWidth),
+
+            modePopup.centerYAnchor.constraint(equalTo: modeLabel.centerYAnchor),
+            modePopup.leadingAnchor.constraint(equalTo: modeLabel.trailingAnchor, constant: 4),
+            modePopup.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -20),
 
             // Provider row
-            providerLabel.topAnchor.constraint(equalTo: modeSegment.bottomAnchor, constant: 14),
+            providerLabel.topAnchor.constraint(equalTo: modeLabel.bottomAnchor, constant: 10),
             providerLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 20),
-            providerLabel.widthAnchor.constraint(equalToConstant: 60),
+            providerLabel.widthAnchor.constraint(equalToConstant: labelWidth),
 
             providerPopup.centerYAnchor.constraint(equalTo: providerLabel.centerYAnchor),
             providerPopup.leadingAnchor.constraint(equalTo: providerLabel.trailingAnchor, constant: 4),
@@ -151,6 +171,7 @@ final class AISheetController: NSViewController {
             // Info label
             infoLabel.topAnchor.constraint(equalTo: promptField.bottomAnchor, constant: 6),
             infoLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 20),
+            infoLabel.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -20),
 
             // Progress bar
             progressBar.topAnchor.constraint(equalTo: infoLabel.bottomAnchor, constant: 10),
@@ -170,14 +191,50 @@ final class AISheetController: NSViewController {
             settingsBtn.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 20),
         ])
 
+        buildModePopup()
         updateProviderPopup()
-        updateInfoLabel()
+        updateModeUI()
+    }
+
+    private func buildModePopup() {
+        popupModes.removeAll()
+        let menu = NSMenu()
+
+        for (index, (group, modes)) in AIMode.groupedModes.enumerated() {
+            if index > 0 {
+                menu.addItem(.separator())
+            }
+
+            let header = NSMenuItem(title: group, action: nil, keyEquivalent: "")
+            header.isEnabled = false
+            header.tag = -1
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: NSFont.systemFont(ofSize: 11, weight: .bold),
+                .foregroundColor: NSColor.inkTextDim,
+            ]
+            header.attributedTitle = NSAttributedString(string: group.uppercased(), attributes: attrs)
+            menu.addItem(header)
+
+            for mode in modes {
+                let item = NSMenuItem(title: mode.displayName, action: nil, keyEquivalent: "")
+                item.tag = popupModes.count
+                menu.addItem(item)
+                popupModes.append(mode)
+            }
+        }
+
+        modePopup.menu = menu
+
+        // Select first enabled item
+        if let first = menu.items.first(where: { $0.isEnabled && $0.tag >= 0 }) {
+            modePopup.select(first)
+        }
     }
 
     // MARK: - Sheet Presentation
 
     func presentAsSheet(on window: NSWindow) {
-        preferredContentSize = NSSize(width: 440, height: 360)
+        preferredContentSize = NSSize(width: 440, height: 380)
         let sheetWindow = NSWindow(contentViewController: self)
         sheetWindow.styleMask = [.titled]
         window.beginSheet(sheetWindow, completionHandler: nil)
@@ -198,10 +255,7 @@ final class AISheetController: NSViewController {
     // MARK: - Actions
 
     @objc private func modeChanged() {
-        let mode = modes[modeSegment.selectedSegment]
-        promptField.placeholderString = mode.promptPlaceholder
-        updateProviderPopup()
-        updateInfoLabel()
+        updateModeUI()
     }
 
     @objc private func cancelTapped() {
@@ -222,10 +276,10 @@ final class AISheetController: NSViewController {
     }
 
     @objc private func applyTapped() {
-        let mode = modes[modeSegment.selectedSegment]
+        let mode = selectedMode
         let prompt = promptField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        if prompt.isEmpty {
+        if mode.needsPrompt && prompt.isEmpty {
             setStatus("Please enter a prompt.", isError: true)
             return
         }
@@ -247,7 +301,7 @@ final class AISheetController: NSViewController {
 
         // Build request
         let canvasSize = delegate?.aiSheetRequestsCanvasSize() ?? CGSize(width: 1024, height: 1024)
-        let inputImage: CGImage? = (mode != .generate) ? delegate?.aiSheetRequestsCanvasImage() : nil
+        let inputImage: CGImage? = mode.needsInputImage ? delegate?.aiSheetRequestsCanvasImage() : nil
         let maskImage: CGImage? = (mode == .inpaint) ? delegate?.aiSheetRequestsSelectionMask() : nil
 
         let request = AIRequest(
@@ -281,7 +335,7 @@ final class AISheetController: NSViewController {
                 switch result {
                 case .success(let response):
                     if let image = response.resultImage {
-                        self.delegate?.aiSheetDidProduceImage(image)
+                        self.delegate?.aiSheetDidProduceImage(image, mode: mode)
                         self.dismiss(nil)
                     } else if let text = response.text {
                         self.delegate?.aiSheetDidProduceText(text)
@@ -301,8 +355,24 @@ final class AISheetController: NSViewController {
 
     // MARK: - UI Helpers
 
+    private func updateModeUI() {
+        let mode = selectedMode
+        promptField.placeholderString = mode.promptPlaceholder
+
+        // Disable prompt for modes that don't need it
+        let needsPrompt = mode.needsPrompt
+        promptField.isEnabled = needsPrompt
+        promptLabel.textColor = needsPrompt ? .inkTextDim : .disabledControlTextColor
+        if !needsPrompt {
+            promptField.stringValue = ""
+        }
+
+        updateProviderPopup()
+        updateInfoLabel()
+    }
+
     private func updateProviderPopup() {
-        let mode = modes[modeSegment.selectedSegment]
+        let mode = selectedMode
         let available = AIProviderManager.shared.allProviders(for: mode)
 
         providerPopup.removeAllItems()
@@ -318,7 +388,8 @@ final class AISheetController: NSViewController {
     }
 
     private func updateInfoLabel() {
-        let mode = modes[modeSegment.selectedSegment]
+        let mode = selectedMode
+
         if mode == .inpaint {
             let hasMask = delegate?.aiSheetRequestsSelectionMask() != nil
             if hasMask {
@@ -329,8 +400,8 @@ final class AISheetController: NSViewController {
                 infoLabel.textColor = .inkTextDim
             }
             infoLabel.isHidden = false
-        } else if mode == .generate {
-            infoLabel.stringValue = "A new layer will be created with the generated image."
+        } else if let hint = mode.infoHint {
+            infoLabel.stringValue = hint
             infoLabel.textColor = .inkTextDim
             infoLabel.isHidden = false
         } else {
@@ -339,8 +410,8 @@ final class AISheetController: NSViewController {
     }
 
     private func setProcessingUI(_ processing: Bool) {
-        promptField.isEnabled = !processing
-        modeSegment.isEnabled = !processing
+        promptField.isEnabled = !processing && selectedMode.needsPrompt
+        modePopup.isEnabled = !processing
         providerPopup.isEnabled = !processing
         applyBtn.isEnabled = !processing
         settingsBtn.isEnabled = !processing

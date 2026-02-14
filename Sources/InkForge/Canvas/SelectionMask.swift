@@ -50,6 +50,27 @@ class SelectionMask {
         self.data = [UInt8](repeating: 0, count: width * height)
     }
 
+    /// Create a selection mask from a grayscale CGImage (white = selected).
+    static func fromMaskImage(_ image: CGImage, width: Int, height: Int) -> SelectionMask? {
+        guard let ctx = CGContext(
+            data: nil, width: width, height: height,
+            bitsPerComponent: 8, bytesPerRow: width,
+            space: CGColorSpaceCreateDeviceGray(),
+            bitmapInfo: CGImageAlphaInfo.none.rawValue
+        ) else { return nil }
+
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+
+        guard let pixelData = ctx.data else { return nil }
+        let pixels = pixelData.bindMemory(to: UInt8.self, capacity: width * height)
+
+        let mask = SelectionMask(width: width, height: height)
+        for i in 0..<(width * height) {
+            mask.data[i] = pixels[i] > 127 ? 255 : 0
+        }
+        return mask
+    }
+
     func selectAll() {
         for i in 0..<data.count { data[i] = 255 }
         invalidateCaches()

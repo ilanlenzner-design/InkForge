@@ -815,9 +815,39 @@ extension MainWindowController {
 }
 
 extension MainWindowController: AISheetDelegate {
-    func aiSheetDidProduceImage(_ image: CGImage) {
-        // If there's an active selection, pre-clip the AI image before adding as layer
-        if let mask = canvasModel.selectionMask, !mask.isEmpty,
+    func aiSheetDidProduceImage(_ image: CGImage, mode: AIMode) {
+        // Object Select: convert mask image to a SelectionMask
+        if mode.producesSelectionMask {
+            let w = Int(canvasModel.canvasSize.width)
+            let h = Int(canvasModel.canvasSize.height)
+            if let mask = SelectionMask.fromMaskImage(image, width: w, height: h) {
+                canvasModel.selectionMask = mask
+                canvasView.updateSelectionDisplay()
+            }
+            canvasView.compositeDirty = true
+            canvasView.needsDisplay = true
+            return
+        }
+
+        let layerName: String
+        switch mode {
+        case .generate:         layerName = "AI Generated"
+        case .referencePose:    layerName = "AI Pose Reference"
+        case .styleTransfer:    layerName = "AI Style Transfer"
+        case .sketchToPainting: layerName = "AI Painting"
+        case .autoColor:        layerName = "AI Colored"
+        case .lineArt:          layerName = "AI Line Art"
+        case .upscale:          layerName = "AI Upscaled"
+        case .bgRemove:         layerName = "AI No Background"
+        case .inpaint:          layerName = "AI Inpainted"
+        case .textureFill:      layerName = "AI Texture"
+        case .outpaint:         layerName = "AI Outpainted"
+        case .variations:       layerName = "AI Variation"
+        default:                layerName = "AI Result"
+        }
+
+        // For inpaint with an active selection, clip the result to the selection
+        if mode == .inpaint, let mask = canvasModel.selectionMask, !mask.isEmpty,
            let maskImage = mask.makeMaskImage() {
             let w = Int(canvasModel.canvasSize.width)
             let h = Int(canvasModel.canvasSize.height)
@@ -829,17 +859,15 @@ extension MainWindowController: AISheetDelegate {
                 bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
             ) else { return }
 
-            // Clip to selection, then stretch AI result to full canvas
-            // (AI was given canvas-sized image, so its output should align)
             let fullRect = CGRect(x: 0, y: 0, width: w, height: h)
             ctx.clip(to: fullRect, mask: maskImage)
             ctx.draw(image, in: fullRect)
 
             if let clipped = ctx.makeImage() {
-                canvasModel.layerStack.addLayerFromImage(clipped, name: "AI Generated")
+                canvasModel.layerStack.addLayerFromImage(clipped, name: layerName)
             }
         } else {
-            canvasModel.layerStack.addLayerFromImage(image, name: "AI Generated")
+            canvasModel.layerStack.addLayerFromImage(image, name: layerName)
         }
         layerPanel.reload()
         canvasView.compositeDirty = true

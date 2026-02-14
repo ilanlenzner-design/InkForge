@@ -4,7 +4,11 @@ import CoreGraphics
 class ReplicateProvider: AIProvider {
 
     let name = "Replicate"
-    let supportedModes: [AIMode] = [.generate, .styleTransfer, .inpaint]
+    let supportedModes: [AIMode] = [
+        .generate, .styleTransfer, .inpaint,
+        .upscale, .bgRemove,
+        .sketchToPainting, .autoColor, .variations,
+    ]
 
     private var currentTask: URLSessionDataTask?
     private var pollTimer: Timer?
@@ -202,13 +206,14 @@ class ReplicateProvider: AIProvider {
     // MARK: - Request Building
 
     private func buildRequestBody(request: AIRequest) -> [String: Any] {
-        var input: [String: Any] = [
-            "prompt": request.prompt,
-        ]
+        var input: [String: Any] = [:]
+
+        if !request.prompt.isEmpty {
+            input["prompt"] = request.prompt
+        }
 
         switch request.mode {
         case .generate:
-            // Flux schnell for generation
             input["num_outputs"] = 1
             input["width"] = min(request.width, 1024)
             input["height"] = min(request.height, 1024)
@@ -218,8 +223,7 @@ class ReplicateProvider: AIProvider {
                 "input": input,
             ]
 
-        case .styleTransfer:
-            // Use flux-schnell with image prompt
+        case .styleTransfer, .sketchToPainting, .autoColor, .variations:
             if let image = request.inputImage, let base64 = ImageConverter.cgImageToBase64(image) {
                 input["image"] = "data:image/png;base64,\(base64)"
             }
@@ -231,7 +235,6 @@ class ReplicateProvider: AIProvider {
             ]
 
         case .inpaint:
-            // SDXL inpainting
             if let image = request.inputImage, let base64 = ImageConverter.cgImageToBase64(image) {
                 input["image"] = "data:image/png;base64,\(base64)"
             }
@@ -245,8 +248,30 @@ class ReplicateProvider: AIProvider {
                 "input": input,
             ]
 
-        case .describe:
-            // Not supported by Replicate provider
+        case .upscale:
+            if let image = request.inputImage, let base64 = ImageConverter.cgImageToBase64(image) {
+                input["image"] = "data:image/png;base64,\(base64)"
+            }
+            input["scale"] = 2
+            input["face_enhance"] = false
+
+            return [
+                "version": "nightmareai/real-esrgan",
+                "input": input,
+            ]
+
+        case .bgRemove:
+            if let image = request.inputImage, let base64 = ImageConverter.cgImageToBase64(image) {
+                input["image"] = "data:image/png;base64,\(base64)"
+            }
+
+            return [
+                "version": "lucataco/remove-bg",
+                "input": input,
+            ]
+
+        default:
+            // Unsupported modes fall through to Gemini
             return [:]
         }
     }

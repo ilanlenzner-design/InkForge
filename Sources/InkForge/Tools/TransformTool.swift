@@ -12,22 +12,30 @@ class TransformTool: Tool {
     private(set) var offset: CGPoint = .zero
     private(set) var scaleX: CGFloat = 1.0
     private(set) var scaleY: CGFloat = 1.0
+    private(set) var rotation: CGFloat = 0  // radians
 
     // Text layer transform: stored original content for commit
     private var originalTextContent: TextContent?
 
-    private enum HandleType { case move, topLeft, topRight, bottomLeft, bottomRight }
+    private enum HandleType { case move, topLeft, topRight, bottomLeft, bottomRight, rotate }
     private var dragStart: CGPoint?
     private var dragHandle: HandleType?
     private var initialOffset: CGPoint = .zero
     private var initialScaleX: CGFloat = 1.0
     private var initialScaleY: CGFloat = 1.0
+    private var initialRotation: CGFloat = 0
 
     var transformedBounds: CGRect {
         CGRect(x: originalBounds.minX + offset.x,
                y: originalBounds.minY + offset.y,
                width: originalBounds.width * scaleX,
                height: originalBounds.height * scaleY)
+    }
+
+    /// Center of the transformed (unrotated) bounds — rotation pivot point.
+    private var transformCenter: CGPoint {
+        let dest = transformedBounds
+        return CGPoint(x: dest.midX, y: dest.midY)
     }
 
     // MARK: - Activation
@@ -61,6 +69,7 @@ class TransformTool: Tool {
         offset = .zero
         scaleX = 1.0
         scaleY = 1.0
+        rotation = 0
         isActive = true
 
         canvas.compositeDirty = true
@@ -86,10 +95,21 @@ class TransformTool: Tool {
             )
             layer.textContent = newContent
         } else {
-            // Pixel layer: draw extracted image at new position/scale
+            // Pixel layer: draw extracted image at new position/scale/rotation
             let dest = transformedBounds
+            let center = CGPoint(x: dest.midX, y: dest.midY)
+
             layer.beginDrawing()
             layer.context.saveGState()
+
+            // Rotate around center (same sign as overlay — beginDrawing already flipped to y-down)
+            if rotation != 0 {
+                layer.context.translateBy(x: center.x, y: center.y)
+                layer.context.rotate(by: rotation)
+                layer.context.translateBy(x: -center.x, y: -center.y)
+            }
+
+            // Local flip for CGImage (bottom-left origin) drawing
             layer.context.translateBy(x: dest.minX, y: dest.minY + dest.height)
             layer.context.scaleBy(x: 1, y: -1)
             layer.context.draw(image, in: CGRect(origin: .zero, size: dest.size))
@@ -118,6 +138,18 @@ class TransformTool: Tool {
         originalTextContent = nil
         dragStart = nil
         dragHandle = nil
+        rotation = 0
+    }
+
+    // MARK: - Geometry Helpers
+
+    private func rotatePoint(_ point: CGPoint, around center: CGPoint, by angle: CGFloat) -> CGPoint {
+        let dx = point.x - center.x
+        let dy = point.y - center.y
+        let cosA = cos(angle)
+        let sinA = sin(angle)
+        return CGPoint(x: center.x + dx * cosA - dy * sinA,
+                       y: center.y + dx * sinA + dy * cosA)
     }
 
     // MARK: - Tool Protocol
@@ -131,9 +163,24 @@ class TransformTool: Tool {
         let viewPoint = canvas.convert(event.locationInWindow, from: nil)
         let cp = canvas.canvasPoint(from: viewPoint)
         let dest = transformedBounds
+        let center = transformCenter
         let hs = 12 / canvas.canvasTransform.scale
+        let stemLen: CGFloat = 25 / canvas.canvasTransform.scale
 
-        // Check corner handles
+        // Transform click point to unrotated space for hit-testing handles
+        let ucp = rotatePoint(cp, around: center, by: -rotation)
+
+        // Check rotation handle (circle above top-center)
+        let rotHandlePos = CGPoint(x: dest.midX, y: dest.minY - stemLen)
+        if CGRect(x: rotHandlePos.x - hs/2, y: rotHandlePos.y - hs/2,
+                  width: hs, height: hs).contains(ucp) {
+            dragHandle = .rotate
+            dragStart = cp  // canvas space for angle computation
+            initialRotation = rotation
+            return
+        }
+
+        // Check corner handles (in unrotated space)
         let corners: [(CGPoint, HandleType)] = [
             (CGPoint(x: dest.minX, y: dest.minY), .topLeft),
             (CGPoint(x: dest.maxX, y: dest.minY), .topRight),
@@ -142,9 +189,9 @@ class TransformTool: Tool {
         ]
 
         for (pt, handle) in corners {
-            if CGRect(x: pt.x - hs/2, y: pt.y - hs/2, width: hs, height: hs).contains(cp) {
+            if CGRect(x: pt.x - hs/2, y: pt.y - hs/2, width: hs, height: hs).contains(ucp) {
                 dragHandle = handle
-                dragStart = cp
+                dragStart = cp  // canvas space (will be unrotated in mouseDragged)
                 initialOffset = offset
                 initialScaleX = scaleX
                 initialScaleY = scaleY
@@ -152,8 +199,8 @@ class TransformTool: Tool {
             }
         }
 
-        // Inside box = move
-        if dest.contains(cp) {
+        // Inside box = move (test in unrotated space)
+        if dest.contains(ucp) {
             dragHandle = .move
             dragStart = cp
             initialOffset = offset
@@ -169,45 +216,62 @@ class TransformTool: Tool {
 
         let viewPoint = canvas.convert(event.locationInWindow, from: nil)
         let cp = canvas.canvasPoint(from: viewPoint)
-        let dx = cp.x - start.x
-        let dy = cp.y - start.y
 
         switch handle {
         case .move:
+            let dx = cp.x - start.x
+            let dy = cp.y - start.y
             offset = CGPoint(x: initialOffset.x + dx, y: initialOffset.y + dy)
 
-        case .bottomRight:
-            let newW = originalBounds.width * initialScaleX + dx
-            let newH = originalBounds.height * initialScaleY + dy
+        case .rotate:
+            let center = transformCenter
+            let curAngle = atan2(cp.y - center.y, cp.x - center.x)
+            let startAngle = atan2(start.y - center.y, start.x - center.x)
+            var newRotation = initialRotation + (curAngle - startAngle)
             if event.modifierFlags.contains(.shift) {
-                let avg = ((newW / originalBounds.width) + (newH / originalBounds.height)) / 2
-                scaleX = max(0.05, avg)
-                scaleY = max(0.05, avg)
-            } else {
-                scaleX = max(0.05, newW / originalBounds.width)
-                scaleY = max(0.05, newH / originalBounds.height)
+                // Snap to 15° increments
+                let snap = CGFloat.pi / 12
+                newRotation = (newRotation / snap).rounded() * snap
+            }
+            rotation = newRotation
+
+        case .bottomRight, .topLeft, .topRight, .bottomLeft:
+            // Scale handles: work in unrotated space, keep center fixed
+            let fixedCenter = CGPoint(
+                x: originalBounds.minX + initialOffset.x + originalBounds.width * initialScaleX / 2,
+                y: originalBounds.minY + initialOffset.y + originalBounds.height * initialScaleY / 2
+            )
+            let uStart = rotatePoint(start, around: fixedCenter, by: -rotation)
+            let uCp = rotatePoint(cp, around: fixedCenter, by: -rotation)
+            let dx = uCp.x - uStart.x
+            let dy = uCp.y - uStart.y
+
+            var signX: CGFloat = 1, signY: CGFloat = 1
+            switch handle {
+            case .topLeft:     signX = -1; signY = -1
+            case .topRight:    signX =  1; signY = -1
+            case .bottomLeft:  signX = -1; signY =  1
+            case .bottomRight: signX =  1; signY =  1
+            default: break
             }
 
-        case .topLeft:
-            let newW = originalBounds.width * initialScaleX - dx
-            let newH = originalBounds.height * initialScaleY - dy
-            scaleX = max(0.05, newW / originalBounds.width)
-            scaleY = max(0.05, newH / originalBounds.height)
-            offset = CGPoint(x: initialOffset.x + dx, y: initialOffset.y + dy)
+            var newScaleX = max(0.05, initialScaleX + signX * dx / originalBounds.width)
+            var newScaleY = max(0.05, initialScaleY + signY * dy / originalBounds.height)
 
-        case .topRight:
-            let newW = originalBounds.width * initialScaleX + dx
-            let newH = originalBounds.height * initialScaleY - dy
-            scaleX = max(0.05, newW / originalBounds.width)
-            scaleY = max(0.05, newH / originalBounds.height)
-            offset = CGPoint(x: initialOffset.x, y: initialOffset.y + dy)
+            if event.modifierFlags.contains(.shift) {
+                let avg = (newScaleX + newScaleY) / 2
+                newScaleX = max(0.05, avg)
+                newScaleY = max(0.05, avg)
+            }
 
-        case .bottomLeft:
-            let newW = originalBounds.width * initialScaleX - dx
-            let newH = originalBounds.height * initialScaleY + dy
-            scaleX = max(0.05, newW / originalBounds.width)
-            scaleY = max(0.05, newH / originalBounds.height)
-            offset = CGPoint(x: initialOffset.x + dx, y: initialOffset.y)
+            scaleX = newScaleX
+            scaleY = newScaleY
+
+            // Adjust offset to keep center at fixedCenter
+            offset = CGPoint(
+                x: fixedCenter.x - originalBounds.minX - originalBounds.width * scaleX / 2,
+                y: fixedCenter.y - originalBounds.minY - originalBounds.height * scaleY / 2
+            )
         }
 
         canvas.compositeDirty = true
@@ -223,6 +287,17 @@ class TransformTool: Tool {
         guard isActive, let image = extractedImage else { return }
 
         let dest = transformedBounds
+        let center = transformCenter
+        let stemLen: CGFloat = 25 / canvas.canvasTransform.scale
+
+        ctx.saveGState()
+
+        // Apply rotation around center
+        if rotation != 0 {
+            ctx.translateBy(x: center.x, y: center.y)
+            ctx.rotate(by: rotation)
+            ctx.translateBy(x: -center.x, y: -center.y)
+        }
 
         // Draw the floating image
         ctx.saveGState()
@@ -240,7 +315,7 @@ class TransformTool: Tool {
 
         // Corner handles
         let hs: CGFloat = 8 / canvas.canvasTransform.scale
-        let handles = [
+        let corners = [
             CGPoint(x: dest.minX, y: dest.minY),
             CGPoint(x: dest.maxX, y: dest.minY),
             CGPoint(x: dest.minX, y: dest.maxY),
@@ -251,11 +326,35 @@ class TransformTool: Tool {
         ctx.setStrokeColor(NSColor.systemBlue.cgColor)
         ctx.setLineWidth(1.0 / canvas.canvasTransform.scale)
 
-        for h in handles {
+        for h in corners {
             let r = CGRect(x: h.x - hs/2, y: h.y - hs/2, width: hs, height: hs)
             ctx.fill(r)
             ctx.stroke(r)
         }
+
+        // Rotation handle: stem line + circle above top-center
+        let topCenter = CGPoint(x: dest.midX, y: dest.minY)
+        let rotHandle = CGPoint(x: dest.midX, y: dest.minY - stemLen)
+
+        // Stem
+        ctx.setStrokeColor(NSColor.systemBlue.cgColor)
+        ctx.setLineWidth(lw)
+        ctx.move(to: topCenter)
+        ctx.addLine(to: rotHandle)
+        ctx.strokePath()
+
+        // Circle handle
+        let rr: CGFloat = 5 / canvas.canvasTransform.scale
+        ctx.setFillColor(NSColor.white.cgColor)
+        ctx.addEllipse(in: CGRect(x: rotHandle.x - rr, y: rotHandle.y - rr,
+                                   width: rr * 2, height: rr * 2))
+        ctx.fillPath()
+        ctx.setStrokeColor(NSColor.systemBlue.cgColor)
+        ctx.addEllipse(in: CGRect(x: rotHandle.x - rr, y: rotHandle.y - rr,
+                                   width: rr * 2, height: rr * 2))
+        ctx.strokePath()
+
+        ctx.restoreGState()  // restore rotation
     }
 
     func handleKeyDown(event: NSEvent, canvas: CanvasView) -> Bool {

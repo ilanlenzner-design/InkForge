@@ -4,7 +4,12 @@ import CoreGraphics
 class GeminiProvider: AIProvider {
 
     let name = "Gemini"
-    let supportedModes: [AIMode] = [.generate, .styleTransfer, .inpaint, .describe]
+    let supportedModes: [AIMode] = [
+        .generate, .referencePose,
+        .styleTransfer, .sketchToPainting, .autoColor, .lineArt, .upscale, .bgRemove,
+        .inpaint, .textureFill, .outpaint,
+        .describe, .variations, .objectSelect,
+    ]
 
     private var currentTask: URLSessionDataTask?
 
@@ -24,7 +29,7 @@ class GeminiProvider: AIProvider {
         case .describe:
             model = "gemini-2.5-flash"
             wantsImage = false
-        case .generate, .styleTransfer, .inpaint:
+        default:
             model = "gemini-3-pro-image-preview"
             wantsImage = true
         }
@@ -104,7 +109,9 @@ class GeminiProvider: AIProvider {
                     ]
                 ])
             }
-        } else if let image = request.inputImage, let base64 = ImageConverter.cgImageToBase64(image) {
+        } else if request.mode.needsInputImage,
+                  let image = request.inputImage,
+                  let base64 = ImageConverter.cgImageToBase64(image) {
             parts.append([
                 "inlineData": [
                     "mimeType": "image/png",
@@ -118,16 +125,37 @@ class GeminiProvider: AIProvider {
         switch request.mode {
         case .generate:
             promptText = "Generate an image: \(request.prompt). Output the image at \(request.width)x\(request.height) resolution."
+        case .referencePose:
+            promptText = "Generate a clean figure drawing reference pose: \(request.prompt). Simple neutral background, clear anatomical proportions. Output as an image."
         case .styleTransfer:
             promptText = "Apply this style to the image: \(request.prompt). Keep the content but change the artistic style. Output as an image."
+        case .sketchToPainting:
+            promptText = "Convert this sketch into a detailed, polished painting in this style: \(request.prompt). Keep the composition and subjects from the sketch but render them as a finished painting. Output as an image."
+        case .autoColor:
+            promptText = "Colorize this line art or sketch with these colors/theme: \(request.prompt). Keep all the lines and details, only add color. Output as an image."
+        case .lineArt:
+            promptText = "Extract clean black line art from this image. Output only the outlines and edges as black lines on a pure white background. No color, no shading, just clean linework. Output as an image."
+        case .upscale:
+            promptText = "Upscale and enhance this image. Add more detail and sharpness while preserving the original content exactly. Output as a high-quality image."
+        case .bgRemove:
+            promptText = "Remove the background from this image. Keep only the main subject(s). Replace the background with solid pure white. Output as an image."
         case .inpaint:
             if request.maskImage != nil {
                 promptText = "This image has a blank white area. Fill in ONLY the blank white area with: \(request.prompt). Keep everything outside the blank area exactly the same. Output the complete image."
             } else {
                 promptText = "Edit this image: \(request.prompt). Output the edited image."
             }
+        case .textureFill:
+            promptText = "Generate a seamless tileable texture pattern of: \(request.prompt). The texture should tile seamlessly in all directions. Output as an image at \(request.width)x\(request.height) resolution."
+        case .outpaint:
+            promptText = "This image is a cropped portion of a larger scene. Naturally extend and expand the image content beyond its current edges. Context for what lies beyond: \(request.prompt). Keep the existing content in the center unchanged and seamlessly extend the scene. Output as an image."
         case .describe:
             promptText = request.prompt.isEmpty ? "Describe this image in detail." : request.prompt
+        case .variations:
+            let extra = request.prompt.isEmpty ? "" : " Variation direction: \(request.prompt)."
+            promptText = "Create an artistic variation of this image. Keep the same general subject and composition but change the style, colors, or mood.\(extra) Output as an image."
+        case .objectSelect:
+            promptText = "Create a black and white segmentation mask for this image. Make the following object pure white: \(request.prompt). Make everything else pure black. Output only the mask as an image — no other content."
         }
 
         parts.append(["text": promptText])
