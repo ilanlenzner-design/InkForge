@@ -15,9 +15,11 @@ class CanvasView: NSView {
     private var strokeBitmap: CGContext?
     private var strokeBitmapDirty: Bool = false
 
-    // Marching ants animation
-    private var marchingAntsPhase: CGFloat = 0
-    private var marchingAntsTimer: Timer?
+    // Marching ants (GPU-animated via CAShapeLayer)
+    private var antsWhiteLayer: CAShapeLayer?
+    private var antsBlackLayer: CAShapeLayer?
+    private var selectionDirty = true
+    private var lastAntsTransform: CGAffineTransform = .identity
 
     // Brush cursor (follows mouse)
     private var lastMouseViewPoint: CGPoint?
@@ -150,10 +152,17 @@ class CanvasView: NSView {
         // 7. Draw tool overlay (selection preview, transform handles)
         toolManager?.activeTool.drawOverlay(in: ctx, canvas: self)
 
-        // 8. Draw selection overlay + marching ants for active selection
+        // 8. Draw selection dim overlay (ants are on a separate CAShapeLayer)
         if let mask = canvasModel.selectionMask, !mask.isEmpty {
             drawSelectionOverlay(mask, in: ctx, canvasSize: canvasSize)
-            drawMarchingAnts(mask, in: ctx)
+        }
+
+        // Update ants layers if selection changed or transform changed
+        let currentTransform = canvasTransform.affineTransform
+        if selectionDirty || (antsWhiteLayer != nil && lastAntsTransform != currentTransform) {
+            updateAntsLayers()
+            selectionDirty = false
+            lastAntsTransform = currentTransform
         }
 
         // 9. Draw brush cursor circle (in canvas coordinates)
@@ -173,27 +182,8 @@ class CanvasView: NSView {
     }
 
     private func drawSelectionOverlay(_ mask: SelectionMask, in ctx: CGContext, canvasSize: CGSize) {
-        guard let maskImage = mask.makeMaskImage() else { return }
+        guard let invertedMask = mask.makeInvertedMaskImage() else { return }
         let rect = CGRect(origin: .zero, size: canvasSize)
-
-        // Invert the mask so unselected areas become bright (clippable)
-        let w = maskImage.width
-        let h = maskImage.height
-        guard let invertCtx = CGContext(
-            data: nil, width: w, height: h,
-            bitsPerComponent: 8, bytesPerRow: w,
-            space: CGColorSpaceCreateDeviceGray(),
-            bitmapInfo: CGImageAlphaInfo.none.rawValue
-        ) else { return }
-
-        invertCtx.draw(maskImage, in: CGRect(x: 0, y: 0, width: w, height: h))
-        if let data = invertCtx.data {
-            let pixels = data.bindMemory(to: UInt8.self, capacity: w * h)
-            for i in 0..<(w * h) {
-                pixels[i] = 255 - pixels[i]
-            }
-        }
-        guard let invertedMask = invertCtx.makeImage() else { return }
 
         // Dim unselected areas with a dark translucent overlay
         ctx.saveGState()
@@ -207,26 +197,63 @@ class CanvasView: NSView {
         ctx.restoreGState()
     }
 
-    private func drawMarchingAnts(_ mask: SelectionMask, in ctx: CGContext) {
+    // MARK: - CAShapeLayer Marching Ants
+
+    private func updateAntsLayers() {
+        guard let mask = canvasModel?.selectionMask, !mask.isEmpty else {
+            removeAntsLayers()
+            return
+        }
+
         let antsPath = mask.marchingAntsPath()
-        let lineWidth = 1.0 / canvasTransform.scale
-        let dashLen = 4.0 / canvasTransform.scale
 
-        // White background stroke
-        ctx.saveGState()
-        ctx.addPath(antsPath)
-        ctx.setStrokeColor(NSColor.white.cgColor)
-        ctx.setLineWidth(lineWidth)
-        ctx.setLineDash(phase: 0, lengths: [])
-        ctx.strokePath()
+        // Transform path from canvas coords to view coords
+        var transform = canvasTransform.affineTransform
+        let viewPath = antsPath.copy(using: &transform)
 
-        // Black dashed foreground stroke (animated)
-        ctx.addPath(antsPath)
-        ctx.setStrokeColor(NSColor.black.cgColor)
-        ctx.setLineWidth(lineWidth)
-        ctx.setLineDash(phase: marchingAntsPhase * dashLen, lengths: [dashLen, dashLen])
-        ctx.strokePath()
-        ctx.restoreGState()
+        let lineWidth: CGFloat = 1.0
+
+        // Create layers if needed
+        if antsWhiteLayer == nil {
+            let white = CAShapeLayer()
+            white.fillColor = nil
+            white.strokeColor = NSColor.white.cgColor
+            white.lineWidth = lineWidth
+            white.zPosition = 100
+            layer?.addSublayer(white)
+            antsWhiteLayer = white
+
+            let black = CAShapeLayer()
+            black.fillColor = nil
+            black.strokeColor = NSColor.black.cgColor
+            black.lineWidth = lineWidth
+            black.lineDashPattern = [4, 4]
+            black.zPosition = 101
+            layer?.addSublayer(black)
+            antsBlackLayer = black
+
+            // Continuous dash animation (GPU-driven, no timer needed)
+            let anim = CABasicAnimation(keyPath: "lineDashPhase")
+            anim.fromValue = 0
+            anim.toValue = 8  // sum of dash pattern
+            anim.duration = 0.4
+            anim.repeatCount = .infinity
+            black.add(anim, forKey: "marchingAnts")
+        }
+
+        // Update paths (no animation needed for path changes)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        antsWhiteLayer?.path = viewPath
+        antsBlackLayer?.path = viewPath
+        CATransaction.commit()
+    }
+
+    private func removeAntsLayers() {
+        antsWhiteLayer?.removeFromSuperlayer()
+        antsBlackLayer?.removeFromSuperlayer()
+        antsWhiteLayer = nil
+        antsBlackLayer = nil
     }
 
     private func drawCheckerboard(in ctx: CGContext, rect: CGRect) {
@@ -397,27 +424,8 @@ class CanvasView: NSView {
     // MARK: - Selection Display
 
     func updateSelectionDisplay() {
-        if let mask = canvasModel?.selectionMask, !mask.isEmpty {
-            startMarchingAnts()
-        } else {
-            stopMarchingAnts()
-        }
+        selectionDirty = true
         needsDisplay = true
-    }
-
-    private func startMarchingAnts() {
-        guard marchingAntsTimer == nil else { return }
-        marchingAntsTimer = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: true) { [weak self] _ in
-            self?.marchingAntsPhase += 1
-            if self?.marchingAntsPhase ?? 0 > 1000 { self?.marchingAntsPhase = 0 }
-            self?.needsDisplay = true
-        }
-    }
-
-    private func stopMarchingAnts() {
-        marchingAntsTimer?.invalidate()
-        marchingAntsTimer = nil
-        marchingAntsPhase = 0
     }
 
     // MARK: - Mouse Events

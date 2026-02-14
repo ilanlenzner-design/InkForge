@@ -14,7 +14,15 @@ class SelectionMask {
 
     private var cachedAntsPath: CGPath?
     private var cachedSimplifiedAntsPath: CGPath?
+    private var cachedMaskImage: CGImage?
+    private var cachedInvertedMaskImage: CGImage?
     private var pathDirty = true
+    private var maskImageDirty = true
+
+    private func invalidateCaches() {
+        pathDirty = true
+        maskImageDirty = true
+    }
 
     var isEmpty: Bool {
         return !data.contains(where: { $0 > 0 })
@@ -44,17 +52,17 @@ class SelectionMask {
 
     func selectAll() {
         for i in 0..<data.count { data[i] = 255 }
-        pathDirty = true
+        invalidateCaches()
     }
 
     func clear() {
         for i in 0..<data.count { data[i] = 0 }
-        pathDirty = true
+        invalidateCaches()
     }
 
     func invert() {
         for i in 0..<data.count { data[i] = 255 - data[i] }
-        pathDirty = true
+        invalidateCaches()
     }
 
     func isSelected(x: Int, y: Int) -> Bool {
@@ -71,7 +79,7 @@ class SelectionMask {
         let minY = max(0, Int(floor(rect.minY)))
         let maxX = min(width - 1, Int(ceil(rect.maxX)) - 1)
         let maxY = min(height - 1, Int(ceil(rect.maxY)) - 1)
-        guard minX <= maxX, minY <= maxY else { pathDirty = true; return }
+        guard minX <= maxX, minY <= maxY else { invalidateCaches(); return }
 
         let value: UInt8 = mode == .subtract ? 0 : 255
         for y in minY...maxY {
@@ -79,7 +87,7 @@ class SelectionMask {
                 data[y * width + x] = value
             }
         }
-        pathDirty = true
+        invalidateCaches()
     }
 
     func selectEllipse(_ rect: CGRect, mode: SelectionMode) {
@@ -89,7 +97,7 @@ class SelectionMask {
         let cy = rect.midY
         let rx = rect.width / 2
         let ry = rect.height / 2
-        guard rx > 0, ry > 0 else { pathDirty = true; return }
+        guard rx > 0, ry > 0 else { invalidateCaches(); return }
 
         let minX = max(0, Int(floor(rect.minX)))
         let minY = max(0, Int(floor(rect.minY)))
@@ -106,12 +114,12 @@ class SelectionMask {
                 }
             }
         }
-        pathDirty = true
+        invalidateCaches()
     }
 
     func selectPolygon(_ points: [CGPoint], mode: SelectionMode) {
         if mode == .new { clear() }
-        guard points.count >= 3 else { pathDirty = true; return }
+        guard points.count >= 3 else { invalidateCaches(); return }
 
         let ys = points.map { $0.y }
         let minY = max(0, Int(ys.min()!))
@@ -147,7 +155,7 @@ class SelectionMask {
                 i += 2
             }
         }
-        pathDirty = true
+        invalidateCaches()
     }
 
     func magicWand(at point: CGPoint, compositeData: UnsafePointer<UInt8>,
@@ -220,7 +228,7 @@ class SelectionMask {
                 }
             }
         }
-        pathDirty = true
+        invalidateCaches()
     }
 
     private func matchColor(_ d: UnsafePointer<UInt8>, _ off: Int,
@@ -238,6 +246,7 @@ class SelectionMask {
     /// Data is copied directly — both SelectionMask and CGBitmapContext store top-to-bottom.
     func makeMaskImage() -> CGImage? {
         guard !isEmpty else { return nil }
+        if !maskImageDirty, let cached = cachedMaskImage { return cached }
 
         let colorSpace = CGColorSpaceCreateDeviceGray()
         guard let ctx = CGContext(data: nil, width: width, height: height,
@@ -251,7 +260,37 @@ class SelectionMask {
             memcpy(dst, ptr.baseAddress!, width * height)
         }
 
-        return ctx.makeImage()
+        let image = ctx.makeImage()
+        cachedMaskImage = image
+        cachedInvertedMaskImage = nil  // invalidate inverted cache too
+        maskImageDirty = false
+        return image
+    }
+
+    func makeInvertedMaskImage() -> CGImage? {
+        if let cached = cachedInvertedMaskImage { return cached }
+        guard let maskImage = makeMaskImage() else { return nil }
+
+        let w = maskImage.width
+        let h = maskImage.height
+        guard let ctx = CGContext(
+            data: nil, width: w, height: h,
+            bitsPerComponent: 8, bytesPerRow: w,
+            space: CGColorSpaceCreateDeviceGray(),
+            bitmapInfo: CGImageAlphaInfo.none.rawValue
+        ) else { return nil }
+
+        ctx.draw(maskImage, in: CGRect(x: 0, y: 0, width: w, height: h))
+        if let data = ctx.data {
+            let pixels = data.bindMemory(to: UInt8.self, capacity: w * h)
+            for i in 0..<(w * h) {
+                pixels[i] = 255 - pixels[i]
+            }
+        }
+
+        let inverted = ctx.makeImage()
+        cachedInvertedMaskImage = inverted
+        return inverted
     }
 
     // MARK: - Marching Ants Path
