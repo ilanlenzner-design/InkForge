@@ -12,9 +12,39 @@ class Layer {
     var isAlphaLocked: Bool = false
     var isClippingMask: Bool = false
     var isReferenceLayer: Bool = false
+    var effects = LayerEffects() {
+        didSet { invalidateEffectsCache() }
+    }
     private(set) var context: CGContext
     private var savedAlpha: [UInt8]?
     let size: CGSize
+
+    // MARK: - Effects Cache
+    private var _cachedEffectsImage: CGImage?
+    private var _cachedEffectsExpand: (left: Int, right: Int, top: Int, bottom: Int)?
+    private(set) var effectsCacheDirty = true
+
+    func invalidateEffectsCache() {
+        _cachedEffectsImage = nil
+        _cachedEffectsExpand = nil
+        effectsCacheDirty = true
+    }
+
+    /// Returns a cached effects-applied image. Computes once, then returns the cached version
+    /// until content or effects change.
+    func cachedEffectsImage() -> (image: CGImage, expand: (left: Int, right: Int, top: Int, bottom: Int))? {
+        guard effects.hasAny else { return nil }
+        if !effectsCacheDirty, let img = _cachedEffectsImage, let exp = _cachedEffectsExpand {
+            return (img, exp)
+        }
+        guard let base = makeImage() else { return nil }
+        let expand = EffectRenderer.expansionNeeded(effects)
+        guard let result = EffectRenderer.applyEffects(effects, to: base) else { return nil }
+        _cachedEffectsImage = result
+        _cachedEffectsExpand = expand
+        effectsCacheDirty = false
+        return (result, expand)
+    }
 
     // MARK: - Text Layer
     private var _textContent: TextContent?
@@ -71,15 +101,18 @@ class Layer {
         context.clear(CGRect(x: 0, y: 0, width: Int(size.width), height: Int(size.height)))
         context.draw(image, in: CGRect(x: 0, y: 0, width: Int(size.width), height: Int(size.height)))
         context.restoreGState()
+        invalidateEffectsCache()
     }
 
     func clear() {
         context.clear(CGRect(origin: .zero, size: size))
+        invalidateEffectsCache()
     }
 
     func fillWith(color: NSColor) {
         context.setFillColor(color.cgColor)
         context.fill(CGRect(origin: .zero, size: size))
+        invalidateEffectsCache()
     }
 
     // MARK: - Mask Operations
@@ -105,6 +138,7 @@ class Layer {
     func deleteMask() {
         maskContext = nil
         isMaskEditing = false
+        invalidateEffectsCache()
     }
 
     func makeMaskImage() -> CGImage? {
@@ -118,6 +152,7 @@ class Layer {
         ctx.clear(CGRect(origin: .zero, size: size))
         ctx.draw(image, in: CGRect(origin: .zero, size: size))
         ctx.restoreGState()
+        invalidateEffectsCache()
     }
 
     /// Prepare context for drawing in top-left (flipped) coordinates, matching the canvas view.
@@ -149,6 +184,7 @@ class Layer {
         if isAlphaLocked && !isMaskEditing {
             restoreAlphaChannel()
         }
+        invalidateEffectsCache()
     }
 
     // MARK: - Text Layer Rendering
@@ -171,6 +207,7 @@ class Layer {
         NSGraphicsContext.restoreGraphicsState()
 
         context.restoreGState()
+        invalidateEffectsCache()
     }
 
     /// Convert a text layer to a regular pixel layer.

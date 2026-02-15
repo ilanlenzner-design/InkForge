@@ -16,16 +16,23 @@ class SelectionMask {
     private var cachedSimplifiedAntsPath: CGPath?
     private var cachedMaskImage: CGImage?
     private var cachedInvertedMaskImage: CGImage?
+    private var cachedDimOverlay: CGImage?
     private var pathDirty = true
     private var maskImageDirty = true
+    private var cachedIsEmpty: Bool?
 
     private func invalidateCaches() {
         pathDirty = true
         maskImageDirty = true
+        cachedIsEmpty = nil
+        cachedDimOverlay = nil
     }
 
     var isEmpty: Bool {
-        return !data.contains(where: { $0 > 0 })
+        if let cached = cachedIsEmpty { return cached }
+        let result = !data.contains(where: { $0 > 0 })
+        cachedIsEmpty = result
+        return result
     }
 
     var bounds: CGRect? {
@@ -288,6 +295,33 @@ class SelectionMask {
         return image
     }
 
+    /// Pre-rendered RGBA overlay: unselected areas are 35% black, selected areas are transparent.
+    /// Cached — only regenerated when the mask changes.
+    func makeDimOverlayImage() -> CGImage? {
+        if let cached = cachedDimOverlay { return cached }
+        guard !isEmpty else { return nil }
+
+        guard let ctx = CGContext(
+            data: nil, width: width, height: height,
+            bitsPerComponent: 8, bytesPerRow: width * 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ), let pixelData = ctx.data else { return nil }
+
+        // Buffer is zeroed (fully transparent). Set alpha on unselected pixels only.
+        let pixels = pixelData.bindMemory(to: UInt8.self, capacity: width * height * 4)
+        let dimAlpha: UInt8 = 89  // ~35%
+        for i in 0..<(width * height) {
+            if data[i] == 0 {
+                pixels[i * 4 + 3] = dimAlpha
+            }
+        }
+
+        let image = ctx.makeImage()
+        cachedDimOverlay = image
+        return image
+    }
+
     func makeInvertedMaskImage() -> CGImage? {
         if let cached = cachedInvertedMaskImage { return cached }
         guard let maskImage = makeMaskImage() else { return nil }
@@ -319,7 +353,7 @@ class SelectionMask {
     /// Returns a simplified CGPath for marching ants display.
     /// Downsamples the mask by the given factor to reduce path complexity.
     /// On a 2048x2048 canvas with factor=4, this produces ~16x fewer segments.
-    func simplifiedAntsPath(downsample ds: Int = 4) -> CGPath {
+    func simplifiedAntsPath(downsample ds: Int = 2) -> CGPath {
         if !pathDirty, let cached = cachedSimplifiedAntsPath { return cached }
 
         let dsW = (width + ds - 1) / ds
@@ -394,6 +428,6 @@ class SelectionMask {
 
     /// Full-resolution path (kept for backward compat but prefer simplifiedAntsPath for display).
     func marchingAntsPath() -> CGPath {
-        return simplifiedAntsPath(downsample: 4)
+        return simplifiedAntsPath(downsample: 2)
     }
 }

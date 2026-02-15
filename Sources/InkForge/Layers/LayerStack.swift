@@ -120,15 +120,39 @@ class LayerStack {
 
             if clippingGroup.isEmpty {
                 // No clipping — draw normally
-                guard var image = baseLayer.makeImage() else { i += 1; continue }
-                if let maskImg = baseLayer.makeMaskImage() {
-                    image = applyMask(image: image, mask: maskImg) ?? image
+                if baseLayer.effects.hasAny, !baseLayer.hasMask,
+                   let cached = baseLayer.cachedEffectsImage() {
+                    // Use cached effects image (fast path)
+                    let fxRect = CGRect(x: -CGFloat(cached.expand.left), y: -CGFloat(cached.expand.bottom),
+                                        width: CGFloat(cached.image.width), height: CGFloat(cached.image.height))
+                    ctx.saveGState()
+                    ctx.setAlpha(baseLayer.opacity)
+                    ctx.setBlendMode(baseLayer.blendMode)
+                    ctx.draw(cached.image, in: fxRect)
+                    ctx.restoreGState()
+                } else {
+                    guard var image = baseLayer.makeImage() else { i += 1; continue }
+                    if let maskImg = baseLayer.makeMaskImage() {
+                        image = applyMask(image: image, mask: maskImg) ?? image
+                    }
+                    if baseLayer.effects.hasAny {
+                        let expand = EffectRenderer.expansionNeeded(baseLayer.effects)
+                        let fxImage = EffectRenderer.applyEffects(baseLayer.effects, to: image) ?? image
+                        let fxRect = CGRect(x: -CGFloat(expand.left), y: -CGFloat(expand.bottom),
+                                            width: CGFloat(fxImage.width), height: CGFloat(fxImage.height))
+                        ctx.saveGState()
+                        ctx.setAlpha(baseLayer.opacity)
+                        ctx.setBlendMode(baseLayer.blendMode)
+                        ctx.draw(fxImage, in: fxRect)
+                        ctx.restoreGState()
+                    } else {
+                        ctx.saveGState()
+                        ctx.setAlpha(baseLayer.opacity)
+                        ctx.setBlendMode(baseLayer.blendMode)
+                        ctx.draw(image, in: rect)
+                        ctx.restoreGState()
+                    }
                 }
-                ctx.saveGState()
-                ctx.setAlpha(baseLayer.opacity)
-                ctx.setBlendMode(baseLayer.blendMode)
-                ctx.draw(image, in: rect)
-                ctx.restoreGState()
             } else {
                 // Render base + clipped layers into temp context, then composite
                 guard let groupCtx = CGContext(
@@ -162,12 +186,23 @@ class LayerStack {
                     groupCtx.restoreGState()
                 }
 
-                // Composite the group onto the main canvas
+                // Apply effects to the composited group, then draw onto main canvas
                 if let groupImage = groupCtx.makeImage() {
-                    ctx.saveGState()
-                    ctx.setBlendMode(baseLayer.blendMode)
-                    ctx.draw(groupImage, in: rect)
-                    ctx.restoreGState()
+                    if baseLayer.effects.hasAny {
+                        let expand = EffectRenderer.expansionNeeded(baseLayer.effects)
+                        let fxImage = EffectRenderer.applyEffects(baseLayer.effects, to: groupImage) ?? groupImage
+                        let fxRect = CGRect(x: -CGFloat(expand.left), y: -CGFloat(expand.bottom),
+                                            width: CGFloat(fxImage.width), height: CGFloat(fxImage.height))
+                        ctx.saveGState()
+                        ctx.setBlendMode(baseLayer.blendMode)
+                        ctx.draw(fxImage, in: fxRect)
+                        ctx.restoreGState()
+                    } else {
+                        ctx.saveGState()
+                        ctx.setBlendMode(baseLayer.blendMode)
+                        ctx.draw(groupImage, in: rect)
+                        ctx.restoreGState()
+                    }
                 }
             }
 
@@ -286,11 +321,24 @@ class LayerStack {
             upperImage = applyMask(image: upperImage, mask: maskImg) ?? upperImage
         }
 
-        lower.context.saveGState()
-        lower.context.setAlpha(upper.opacity)
-        lower.context.setBlendMode(upper.blendMode)
-        lower.context.draw(upperImage, in: CGRect(origin: .zero, size: canvasSize))
-        lower.context.restoreGState()
+        // Bake effects into merged result
+        if upper.effects.hasAny {
+            upperImage = EffectRenderer.applyEffects(upper.effects, to: upperImage) ?? upperImage
+            let expand = EffectRenderer.expansionNeeded(upper.effects)
+            let fxRect = CGRect(x: -CGFloat(expand.left), y: -CGFloat(expand.bottom),
+                                width: CGFloat(upperImage.width), height: CGFloat(upperImage.height))
+            lower.context.saveGState()
+            lower.context.setAlpha(upper.opacity)
+            lower.context.setBlendMode(upper.blendMode)
+            lower.context.draw(upperImage, in: fxRect)
+            lower.context.restoreGState()
+        } else {
+            lower.context.saveGState()
+            lower.context.setAlpha(upper.opacity)
+            lower.context.setBlendMode(upper.blendMode)
+            lower.context.draw(upperImage, in: CGRect(origin: .zero, size: canvasSize))
+            lower.context.restoreGState()
+        }
 
         layers.remove(at: index)
         activeLayerIndex = index - 1

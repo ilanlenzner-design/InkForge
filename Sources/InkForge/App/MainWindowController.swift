@@ -503,6 +503,121 @@ extension MainWindowController: LayerPanelDelegate {
         canvasView.needsDisplay = true
     }
 
+    func layerPanelDidConvertToMask(at index: Int) {
+        let stack = canvasModel.layerStack
+        guard index > 0,
+              let sourceLayer = stack.layers[safe: index],
+              let targetLayer = stack.layers[safe: index - 1],
+              let sourceImage = sourceLayer.makeImage() else { return }
+
+        // Extract alpha channel from source layer as the mask.
+        // Where content was drawn (any color) → white (visible),
+        // where transparent → black (hidden).
+        let w = Int(sourceLayer.size.width)
+        let h = Int(sourceLayer.size.height)
+
+        // First render source into RGBA to read alpha
+        guard let rgbaCtx = CGContext(
+            data: nil, width: w, height: h,
+            bitsPerComponent: 8, bytesPerRow: w * 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ), let rgbaData = rgbaCtx.data else { return }
+        rgbaCtx.draw(sourceImage, in: CGRect(x: 0, y: 0, width: w, height: h))
+
+        // Build grayscale mask from alpha channel
+        guard let grayCtx = CGContext(
+            data: nil, width: w, height: h,
+            bitsPerComponent: 8, bytesPerRow: w,
+            space: CGColorSpaceCreateDeviceGray(),
+            bitmapInfo: CGImageAlphaInfo.none.rawValue
+        ), let grayData = grayCtx.data else { return }
+
+        let src = rgbaData.bindMemory(to: UInt8.self, capacity: w * h * 4)
+        let dst = grayData.bindMemory(to: UInt8.self, capacity: w * h)
+        for i in 0..<(w * h) {
+            dst[i] = src[i * 4 + 3]  // alpha → mask luminance
+        }
+
+        guard let grayImage = grayCtx.makeImage() else { return }
+
+        // Create mask on target layer and draw the grayscale image
+        if !targetLayer.hasMask {
+            targetLayer.createMask()
+        }
+        targetLayer.restoreMaskFromImage(grayImage)
+
+        // Delete the source layer
+        stack.deleteLayer(at: index)
+
+        // Select the target layer
+        stack.activeLayerIndex = min(index - 1, stack.layers.count - 1)
+
+        layerPanel.reload()
+        canvasView.compositeDirty = true
+        canvasView.needsDisplay = true
+    }
+
+    func layerPanelDidApplyMask(at index: Int) {
+        guard let layer = canvasModel.layerStack.layers[safe: index],
+              layer.hasMask,
+              let maskImage = layer.makeMaskImage(),
+              let layerImage = layer.makeImage() else { return }
+
+        let w = Int(layer.size.width)
+        let h = Int(layer.size.height)
+
+        // Read mask pixels (grayscale)
+        guard let maskCtx = CGContext(
+            data: nil, width: w, height: h,
+            bitsPerComponent: 8, bytesPerRow: w,
+            space: CGColorSpaceCreateDeviceGray(),
+            bitmapInfo: CGImageAlphaInfo.none.rawValue
+        ), let maskData = maskCtx.data else { return }
+        maskCtx.draw(maskImage, in: CGRect(x: 0, y: 0, width: w, height: h))
+        let maskPixels = maskData.bindMemory(to: UInt8.self, capacity: w * h)
+
+        // Read layer pixels (RGBA)
+        guard let rgbaCtx = CGContext(
+            data: nil, width: w, height: h,
+            bitsPerComponent: 8, bytesPerRow: w * 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ), let rgbaData = rgbaCtx.data else { return }
+        rgbaCtx.draw(layerImage, in: CGRect(x: 0, y: 0, width: w, height: h))
+        let pixels = rgbaData.bindMemory(to: UInt8.self, capacity: w * h * 4)
+
+        // Multiply alpha by mask value
+        for i in 0..<(w * h) {
+            let maskVal = maskPixels[i]
+            if maskVal == 0 {
+                // Fully masked out — clear pixel
+                pixels[i * 4] = 0
+                pixels[i * 4 + 1] = 0
+                pixels[i * 4 + 2] = 0
+                pixels[i * 4 + 3] = 0
+            } else if maskVal < 255 {
+                // Partial mask — scale all premultiplied components
+                let scale = UInt16(maskVal)
+                pixels[i * 4]     = UInt8((UInt16(pixels[i * 4]) * scale) / 255)
+                pixels[i * 4 + 1] = UInt8((UInt16(pixels[i * 4 + 1]) * scale) / 255)
+                pixels[i * 4 + 2] = UInt8((UInt16(pixels[i * 4 + 2]) * scale) / 255)
+                pixels[i * 4 + 3] = UInt8((UInt16(pixels[i * 4 + 3]) * scale) / 255)
+            }
+        }
+
+        guard let result = rgbaCtx.makeImage() else { return }
+
+        canvasModel.snapshotActiveLayerForUndo()
+        layer.restoreFromImage(result)
+        layer.deleteMask()
+        canvasModel.registerUndoForActiveLayer(actionName: "Apply Mask")
+
+        layerPanel.reload()
+        canvasView.compositeDirty = true
+        canvasView.needsDisplay = true
+    }
+
     func layerPanelDidRasterize(at index: Int) {
         guard let layer = canvasModel.layerStack.layers[safe: index],
               layer.isTextLayer else { return }
@@ -510,6 +625,50 @@ extension MainWindowController: LayerPanelDelegate {
         canvasModel.layerStack.rasterizeLayer(at: index)
         canvasModel.registerUndoForActiveLayer(actionName: "Rasterize Text")
         layerPanel.reload()
+        canvasView.compositeDirty = true
+        canvasView.needsDisplay = true
+    }
+
+    func layerPanelDidRequestEffects(at index: Int) {
+        guard let layer = canvasModel.layerStack.layers[safe: index],
+              let window = window else { return }
+        let sheet = EffectsSheetController()
+        sheet.initialEffects = layer.effects
+        sheet.delegate = self
+        Self.effectsPreviewOriginal = layer.effects
+        sheet.presentAsSheet(on: window)
+    }
+}
+
+// MARK: - EffectsSheetDelegate
+
+extension MainWindowController: EffectsSheetDelegate {
+    private static var effectsPreviewOriginal: LayerEffects?
+
+    func effectsSheetDidApply(_ effects: LayerEffects) {
+        guard let layer = canvasModel.layerStack.activeLayer else { return }
+        canvasModel.snapshotActiveLayerForUndo()
+        layer.effects = effects
+        canvasModel.registerUndoForActiveLayer(actionName: "Layer Effects")
+        Self.effectsPreviewOriginal = nil
+        layerPanel.reload()
+        canvasView.compositeDirty = true
+        canvasView.needsDisplay = true
+    }
+
+    func effectsSheetDidCancel() {
+        guard let layer = canvasModel.layerStack.activeLayer else { return }
+        if let original = Self.effectsPreviewOriginal {
+            layer.effects = original
+        }
+        Self.effectsPreviewOriginal = nil
+        canvasView.compositeDirty = true
+        canvasView.needsDisplay = true
+    }
+
+    func effectsSheetDidChangeParams(_ effects: LayerEffects) {
+        guard let layer = canvasModel.layerStack.activeLayer else { return }
+        layer.effects = effects
         canvasView.compositeDirty = true
         canvasView.needsDisplay = true
     }

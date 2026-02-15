@@ -15,6 +15,9 @@ protocol LayerPanelDelegate: AnyObject {
     func layerPanelDidToggleMask(at index: Int)
     func layerPanelDidToggleMaskEditing(at index: Int)
     func layerPanelDidRasterize(at index: Int)
+    func layerPanelDidConvertToMask(at index: Int)
+    func layerPanelDidApplyMask(at index: Int)
+    func layerPanelDidRequestEffects(at index: Int)
 }
 
 class LayerPanelView: NSView {
@@ -32,6 +35,7 @@ class LayerPanelView: NSView {
     private var clipMaskBtn: NSButton!
     private var refLayerBtn: NSButton!
     private var maskBtn: NSButton!
+    private var fxBtn: NSButton!
     private var blendModePopup: NSPopUpButton!
     private let thumbSize: CGFloat = 52
 
@@ -114,10 +118,13 @@ class LayerPanelView: NSView {
                                         action: #selector(refLayerClicked), tooltip: "Reference Layer (for Fill)")
         maskBtn = makeToggleButton(symbol: "theatermasks", label: "Mask",
                                     action: #selector(maskClicked), tooltip: "Toggle Layer Mask")
+        fxBtn = makeToggleButton(symbol: "sparkles", label: "FX",
+                                  action: #selector(fxClicked), tooltip: "Layer Effects")
         propRow.addArrangedSubview(alphaLockBtn)
         propRow.addArrangedSubview(clipMaskBtn)
         propRow.addArrangedSubview(refLayerBtn)
         propRow.addArrangedSubview(maskBtn)
+        propRow.addArrangedSubview(fxBtn)
 
         // -- Scroll view for layer list (middle, flexible) --
         scrollView = NSScrollView()
@@ -257,6 +264,7 @@ class LayerPanelView: NSView {
             updateToggleStyle(refLayerBtn, active: activeLayer.isReferenceLayer, color: .systemOrange)
             maskBtn.state = activeLayer.hasMask ? .on : .off
             updateToggleStyle(maskBtn, active: activeLayer.hasMask, color: activeLayer.isMaskEditing ? .systemGreen : .inkAccent)
+            updateToggleStyle(fxBtn, active: activeLayer.effects.hasAny, color: .systemPurple)
             if let idx = Self.blendModes.firstIndex(of: activeLayer.blendMode) {
                 blendModePopup.selectItem(at: idx)
             }
@@ -420,6 +428,7 @@ class LayerPanelView: NSView {
         if layer.isClippingMask { statusParts.append("Clip") }
         if layer.isReferenceLayer { statusParts.append("Ref") }
         if layer.hasMask { statusParts.append(layer.isMaskEditing ? "Editing Mask" : "Mask") }
+        if layer.effects.hasAny { statusParts.append("FX") }
         let statusLabel = NSTextField(labelWithString: statusParts.joined(separator: " \u{00B7} "))
         statusLabel.font = .systemFont(ofSize: 10)
         statusLabel.textColor = .inkTextDim
@@ -437,6 +446,22 @@ class LayerPanelView: NSView {
                 lockLabel.bottomAnchor.constraint(equalTo: row.bottomAnchor, constant: -6),
             ])
         }
+
+        // --- Right-click context menu ---
+        let menu = NSMenu()
+        let convertItem = NSMenuItem(title: "Convert to Mask", action: #selector(convertToMaskClicked(_:)), keyEquivalent: "")
+        convertItem.target = self
+        convertItem.tag = index
+        convertItem.isEnabled = index > 0  // needs a layer below
+        menu.addItem(convertItem)
+
+        let applyMaskItem = NSMenuItem(title: "Apply Mask", action: #selector(applyMaskClicked(_:)), keyEquivalent: "")
+        applyMaskItem.target = self
+        applyMaskItem.tag = index
+        applyMaskItem.isEnabled = layer.hasMask
+        menu.addItem(applyMaskItem)
+
+        row.menu = menu
 
         // --- Invisible click target for selection ---
         let selectBtn = NSButton(title: "", target: self, action: #selector(layerSelected(_:)))
@@ -545,8 +570,21 @@ class LayerPanelView: NSView {
         delegate?.layerPanelDidToggleMask(at: stack.activeLayerIndex)
     }
 
+    @objc private func fxClicked() {
+        guard let stack = layerStack else { return }
+        delegate?.layerPanelDidRequestEffects(at: stack.activeLayerIndex)
+    }
+
     @objc private func maskThumbClicked(_ sender: NSButton) {
         delegate?.layerPanelDidToggleMaskEditing(at: sender.tag)
+    }
+
+    @objc private func convertToMaskClicked(_ sender: NSMenuItem) {
+        delegate?.layerPanelDidConvertToMask(at: sender.tag)
+    }
+
+    @objc private func applyMaskClicked(_ sender: NSMenuItem) {
+        delegate?.layerPanelDidApplyMask(at: sender.tag)
     }
 
     @objc private func rasterizeClicked() {

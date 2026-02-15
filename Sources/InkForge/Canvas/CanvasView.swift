@@ -182,18 +182,14 @@ class CanvasView: NSView {
     }
 
     private func drawSelectionOverlay(_ mask: SelectionMask, in ctx: CGContext, canvasSize: CGSize) {
-        guard let invertedMask = mask.makeInvertedMaskImage() else { return }
+        guard let overlay = mask.makeDimOverlayImage() else { return }
         let rect = CGRect(origin: .zero, size: canvasSize)
 
-        // Dim unselected areas with a dark translucent overlay
+        // Blit the pre-rendered dim overlay (flip for CGImage bottom-up convention)
         ctx.saveGState()
         ctx.translateBy(x: 0, y: canvasSize.height)
         ctx.scaleBy(x: 1, y: -1)
-        ctx.clip(to: rect, mask: invertedMask)
-        ctx.translateBy(x: 0, y: canvasSize.height)
-        ctx.scaleBy(x: 1, y: -1)
-        ctx.setFillColor(NSColor.black.withAlphaComponent(0.35).cgColor)
-        ctx.fill(rect)
+        ctx.draw(overlay, in: rect)
         ctx.restoreGState()
     }
 

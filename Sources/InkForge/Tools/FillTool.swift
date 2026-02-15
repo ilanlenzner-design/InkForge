@@ -36,12 +36,12 @@ class FillTool: Tool {
         // Check if click is within selection (if selection exists)
         if let sel = sel, !sel.isEmpty, !sel.isSelected(x: pixelX, y: pixelY) { return }
 
-        // Use reference layer for boundary detection if one is set, otherwise composite.
+        // Use reference layer for boundary detection if one is set, otherwise active layer.
         let refImage: CGImage?
         if let refLayer = canvas.canvasModel.layerStack.referenceLayer {
             refImage = refLayer.makeImage()
         } else {
-            refImage = canvas.canvasModel.layerStack.compositeImage()
+            refImage = layer.makeImage()
         }
 
         guard let compositeImage = refImage,
